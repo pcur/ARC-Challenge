@@ -2,19 +2,13 @@ import os
 import json
 import inspect
 import tqdm
-import pathlib
-import gc
 
 import arc_types
 import constants
 import dsl
 import tests
 import solvers
-from datetime import datetime
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 
 def get_data(train=True):
@@ -122,37 +116,11 @@ def test_solvers_correctness(data, solvers_module):
 
 
 def main():
-    #data = get_data(train=True)
-    #run_dsl_tests(dsl, tests)
-    #test_solvers_formatting(solvers, dsl)
-    #test_solvers_correctness(data, solvers)
-    print(fr"{pathlib.Path.cwd()}" + r"\builder\data\training")
-    print(pathlib.Path.cwd())
-    test_model_path = fr"{pathlib.Path(__file__).parent.resolve()}" + r"\models_folder\trm_04_10_2026___15_13_34_9.714437023865129_11.682365276195386.pt"
-    train_loss = 1.0
-    val_loss = 0.5
-     
-    checkpoint = torch.load(test_model_path)
-    print("Available keys:", checkpoint.keys())
+    data = get_data(train=True)
+    run_dsl_tests(dsl, tests)
+    test_solvers_formatting(solvers, dsl)
+    test_solvers_correctness(data, solvers)
 
-    # 3. Print the description (assuming the key is 'description')
-    if 'description' in checkpoint:
-        print(checkpoint['description'])
-    else:
-        print("Description not found in the file.")
 
-    now = datetime.now()
-
-    # Example format: 2024-05-20 14:30:15
-    formatted_now = now.strftime("%m-%d-%Y_%H:%M:%S")
-    print(formatted_now)
-    print(fr"{pathlib.Path(__file__).parent.resolve()}" + fr"\models_folder\trm_{formatted_now}_{train_loss}_{val_loss}_.pt")
-    print(torch.cuda.memory_allocated() / 1024**2, "MB allocated")
-    print(torch.cuda.memory_reserved() / 1024**2, "MB reserved")
-    print(torch.cuda.mem_get_info()[0] / 1024**2, "MB free")
-    print(torch.cuda.memory_summary())
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 if __name__ == '__main__':
     main()

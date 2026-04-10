@@ -58,7 +58,6 @@ import json
 import math
 import random
 from typing import List, Dict, Optional, Tuple
-import gc
 
 import torch
 import torch.nn as nn
@@ -69,8 +68,7 @@ import torch.nn.functional as F
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
-#TRAIN_PATH = r"C:\Users\tedhun\OneDrive - Wanzl GmbH & Co. KGaA\Microsoft Teams Chat Files\outputs\Documents\GS\ARC\Assignment10\Builder\data\training"
-TRAIN_PATH = r"builder\data\training"
+TRAIN_PATH = r"C:\Users\tedhun\OneDrive - Wanzl GmbH & Co. KGaA\Microsoft Teams Chat Files\outputs\Documents\GS\ARC\Assignment10\Builder\data\training"
 DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
 
 SEED       = 42
@@ -732,153 +730,146 @@ def set_seed(seed: int) -> None:
 
 
 def main():
-    try:
-        set_seed(SEED)
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        save_path  = os.path.join(script_dir, "arc_trm_best.pt")
+    set_seed(SEED)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    save_path  = os.path.join(script_dir, "arc_trm_best.pt")
 
-        print(f"Device          : {DEVICE}")
-        print(f"Hidden size     : {HIDDEN_SIZE}")
-        print(f"Recursions      : {N_RECURSIONS}")
-        print(f"Inner layers    : {T_INNER}")
-        print(f"Supervision N   : {N_SUP}")
-        print(f"Augmentations   : {N_AUGMENTATIONS}")
-        print(f"Batch size      : {BATCH_SIZE}")
-        print(f"Epochs          : {EPOCHS}\n")
+    print(f"Device          : {DEVICE}")
+    print(f"Hidden size     : {HIDDEN_SIZE}")
+    print(f"Recursions      : {N_RECURSIONS}")
+    print(f"Inner layers    : {T_INNER}")
+    print(f"Supervision N   : {N_SUP}")
+    print(f"Augmentations   : {N_AUGMENTATIONS}")
+    print(f"Batch size      : {BATCH_SIZE}")
+    print(f"Epochs          : {EPOCHS}\n")
 
-        # ── build dataset ─────────────────────────────────────────────────────
-        print("Building augmented task samples...")
-        all_samples = build_task_samples(
-            TRAIN_PATH,
-            max_files=MAX_FILES,
-            n_augmentations=N_AUGMENTATIONS,
-            max_demos=MAX_DEMOS,
+    # ── build dataset ─────────────────────────────────────────────────────
+    print("Building augmented task samples...")
+    all_samples = build_task_samples(
+        TRAIN_PATH,
+        max_files=MAX_FILES,
+        n_augmentations=N_AUGMENTATIONS,
+        max_demos=MAX_DEMOS,
+    )
+
+    if not all_samples:
+        raise RuntimeError("No samples built. Check TRAIN_PATH.")
+
+    random.shuffle(all_samples)
+    split_idx     = max(1, int(0.9 * len(all_samples)))
+    train_samples = all_samples[:split_idx]
+    val_samples   = all_samples[split_idx:] if split_idx < len(all_samples) else all_samples[:1]
+
+    print(f"Train samples   : {len(train_samples)}")
+    print(f"Val samples     : {len(val_samples)}\n")
+
+    # ── compute context length ────────────────────────────────────────────
+    # Must be consistent across all batches
+    max_demos_in_data = max(len(s["demo_inputs"]) for s in all_samples)
+    context_len = (PUZZLE_EMB_LEN
+                   + max_demos_in_data * 2 * GRID_FLAT_LEN
+                   + GRID_FLAT_LEN)
+
+    print(f"Context length  : {context_len} tokens")
+    print(f"  = {PUZZLE_EMB_LEN} puzzle + "
+          f"{max_demos_in_data}×2×{GRID_FLAT_LEN} demos + "
+          f"{GRID_FLAT_LEN} test_in")
+
+    # Warn if context is very large — attention is O(seq^2)
+    if context_len > 2000:
+        print(f"\n  ⚠  Context length {context_len} is large.")
+        print(f"     Attention cost ∝ {context_len}² = {context_len**2:,} ops per head.")
+        print(f"     Consider reducing GRID_H/GRID_W or MAX_DEMOS if training is slow.\n")
+    else:
+        print(f"  ✓ Context length is manageable.\n")
+
+    # ── build model ───────────────────────────────────────────────────────
+    model = TinyRecursiveModel(
+        context_len=context_len,
+        hidden_size=HIDDEN_SIZE,
+        n_heads=N_HEADS,
+        ff_dim=FF_DIM,
+        dropout=DROPOUT,
+        n_recursions=N_RECURSIONS,
+        t_inner=T_INNER,
+        n_sup=N_SUP,
+    ).to(DEVICE)
+
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model params    : {n_params:,}\n")
+
+    # ── optimizer with separate embedding LR (as per paper) ───────────────
+    embedding_params = list(model.token_emb.parameters()) + \
+                       list(model.pos_emb.parameters())
+    other_params     = [p for p in model.parameters()
+                        if p.requires_grad and
+                        not any(p is ep for ep in embedding_params)]
+
+    optimizer = torch.optim.AdamW([
+        {"params": embedding_params, "lr": EMBED_LR},
+        {"params": other_params,     "lr": LR},
+    ], betas=(0.9, 0.95), weight_decay=0.1)
+
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=EPOCHS, eta_min=LR / 10,
+    )
+
+    ema = EMA(model, decay=EMA_DECAY) if USE_EMA else None
+
+    best_val  = math.inf
+    print("Starting TRM training...\n")
+
+    for epoch in range(1, EPOCHS + 1):
+        train_loss = run_epoch(
+            model, optimizer, train_samples,
+            BATCH_SIZE, DEVICE, ema=ema, train=True,
         )
 
-        if not all_samples:
-            raise RuntimeError("No samples built. Check TRAIN_PATH.")
+        # Evaluate with EMA weights if available
+        if ema is not None:
+            ema.apply_shadow(model)
 
-        random.shuffle(all_samples)
-        split_idx     = max(1, int(0.9 * len(all_samples)))
-        train_samples = all_samples[:split_idx]
-        val_samples   = all_samples[split_idx:] if split_idx < len(all_samples) else all_samples[:1]
+        val_loss = run_epoch(
+            model, None, val_samples,
+            BATCH_SIZE, DEVICE, ema=None, train=False,
+        )
 
-        print(f"Train samples   : {len(train_samples)}")
-        print(f"Val samples     : {len(val_samples)}\n")
-
-        # ── compute context length ────────────────────────────────────────────
-        # Must be consistent across all batches
-        max_demos_in_data = max(len(s["demo_inputs"]) for s in all_samples)
-        context_len = (PUZZLE_EMB_LEN
-                        + max_demos_in_data * 2 * GRID_FLAT_LEN
-                        + GRID_FLAT_LEN)
-
-        print(f"Context length  : {context_len} tokens")
-        print(f"  = {PUZZLE_EMB_LEN} puzzle + "
-                f"{max_demos_in_data}×2×{GRID_FLAT_LEN} demos + "
-                f"{GRID_FLAT_LEN} test_in")
-
-        # Warn if context is very large — attention is O(seq^2)
-        if context_len > 2000:
-            print(f"\n  ⚠  Context length {context_len} is large.")
-            print(f"     Attention cost ∝ {context_len}² = {context_len**2:,} ops per head.")
-            print(f"     Consider reducing GRID_H/GRID_W or MAX_DEMOS if training is slow.\n")
+        # Exact-match accuracy every 10 epochs
+        if epoch % 10 == 0:
+            # Use a small subset of unique tasks for speed
+            unique_val = {s["task_id"]: s for s in val_samples}
+            eval_tasks = list(unique_val.values())[:50]
+            n_correct  = sum(
+                evaluate_task(s, model, DEVICE) for s in eval_tasks
+            )
+            acc = 100.0 * n_correct / max(len(eval_tasks), 1)
+            print(f"Epoch {epoch:03d} | train={train_loss:.4f} | "
+                  f"val={val_loss:.4f} | "
+                  f"exact_match={n_correct}/{len(eval_tasks)} ({acc:.1f}%)")
         else:
-            print(f"  ✓ Context length is manageable.\n")
+            print(f"Epoch {epoch:03d} | train={train_loss:.4f} | val={val_loss:.4f}")
 
-        # ── build model ───────────────────────────────────────────────────────
-        model = TinyRecursiveModel(
-            context_len=context_len,
-            hidden_size=HIDDEN_SIZE,
-            n_heads=N_HEADS,
-            ff_dim=FF_DIM,
-            dropout=DROPOUT,
-            n_recursions=N_RECURSIONS,
-            t_inner=T_INNER,
-            n_sup=N_SUP,
-        ).to(DEVICE)
+        if val_loss < best_val:
+            best_val = val_loss
+            torch.save({
+                "model_state_dict"    : model.state_dict(),
+                "ema_shadow"          : ema.shadow if ema else None,
+                "optimizer_state_dict": optimizer.state_dict(),
+                "context_len"         : context_len,
+                "hidden_size"         : HIDDEN_SIZE,
+                "n_recursions"        : N_RECURSIONS,
+                "t_inner"             : T_INNER,
+                "best_val_loss"       : best_val,
+                "epoch"               : epoch,
+            }, save_path)
+            print(f"  → Saved best TRM (val={best_val:.4f})")
 
-        n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"Model params    : {n_params:,}\n")
+        if ema is not None:
+            ema.restore(model)
 
-        # ── optimizer with separate embedding LR (as per paper) ───────────────
-        embedding_params = list(model.token_emb.parameters()) + \
-                            list(model.pos_emb.parameters())
-        other_params     = [p for p in model.parameters()
-                            if p.requires_grad and
-                            not any(p is ep for ep in embedding_params)]
+        scheduler.step()
 
-        optimizer = torch.optim.AdamW([
-            {"params": embedding_params, "lr": EMBED_LR},
-            {"params": other_params,     "lr": LR},
-        ], betas=(0.9, 0.95), weight_decay=0.1)
-
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=EPOCHS, eta_min=LR / 10,
-        )
-
-        ema = EMA(model, decay=EMA_DECAY) if USE_EMA else None
-
-        best_val  = math.inf
-        print("Starting TRM training...\n")
-
-        for epoch in range(1, EPOCHS + 1):
-            train_loss = run_epoch(
-                model, optimizer, train_samples,
-                BATCH_SIZE, DEVICE, ema=ema, train=True,
-            )
-
-            # Evaluate with EMA weights if available
-            if ema is not None:
-                ema.apply_shadow(model)
-
-            val_loss = run_epoch(
-                model, None, val_samples,
-                BATCH_SIZE, DEVICE, ema=None, train=False,
-            )
-
-            # Exact-match accuracy every 10 epochs
-            if epoch % 10 == 0:
-                # Use a small subset of unique tasks for speed
-                unique_val = {s["task_id"]: s for s in val_samples}
-                eval_tasks = list(unique_val.values())[:50]
-                n_correct  = sum(
-                    evaluate_task(s, model, DEVICE) for s in eval_tasks
-                )
-                acc = 100.0 * n_correct / max(len(eval_tasks), 1)
-                print(f"Epoch {epoch:03d} | train={train_loss:.4f} | "
-                        f"val={val_loss:.4f} | "
-                        f"exact_match={n_correct}/{len(eval_tasks)} ({acc:.1f}%)")
-            else:
-                print(f"Epoch {epoch:03d} | train={train_loss:.4f} | val={val_loss:.4f}")
-
-            if val_loss < best_val:
-                best_val = val_loss
-                torch.save({
-                    "model_state_dict"    : model.state_dict(),
-                    "ema_shadow"          : ema.shadow if ema else None,
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "context_len"         : context_len,
-                    "hidden_size"         : HIDDEN_SIZE,
-                    "n_recursions"        : N_RECURSIONS,
-                    "t_inner"             : T_INNER,
-                    "best_val_loss"       : best_val,
-                    "epoch"               : epoch,
-                }, save_path)
-                print(f"  → Saved best TRM (val={best_val:.4f})")
-
-            if ema is not None:
-                ema.restore(model)
-
-            scheduler.step()
-
-        print(f"\nTraining complete. Best val loss: {best_val:.4f}")
-    except KeyboardInterrupt:
-        print("Interrupted by Ctrl + C")
-    finally:
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+    print(f"\nTraining complete. Best val loss: {best_val:.4f}")
 
 
 if __name__ == "__main__":

@@ -56,10 +56,6 @@ import json
 import math
 import random
 from typing import List, Dict, Optional, Tuple
-import gc
-import pathlib
-from datetime import datetime
-
 
 import torch
 import torch.nn as nn
@@ -75,20 +71,15 @@ from custom_object3 import (
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
-#TRAIN_PATH = r"C:\Users\tedhun\OneDrive - Wanzl GmbH & Co. KGaA\Microsoft Teams Chat Files\outputs\Documents\GS\ARC\Assignment10\Builder\data\training"
-
-TRAIN_PATH = fr"{pathlib.Path.cwd()}" + r"\builder\data\training"
-
+TRAIN_PATH = r"C:\Users\tedhun\OneDrive - Wanzl GmbH & Co. KGaA\Microsoft Teams Chat Files\outputs\Documents\GS\ARC\Assignment10\Builder\data\training"
 DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
-script_dir = os.path.dirname(os.path.abspath(__file__))
-save_path  = os.path.join(script_dir, f"test_model.pt")
 
 SEED       = 42
 #EPOCHS     = 60
 EPOCHS     = 2
 LR         = 1e-4
 EMBED_LR   = 1e-2
-BATCH_SIZE = 30
+BATCH_SIZE = 4
 MAX_FILES  = None
 PRINT_EVERY = 10
 
@@ -110,9 +101,9 @@ HIDDEN_SIZE  = 256
 N_HEADS      = 4
 FF_DIM       = 1024
 DROPOUT      = 0.1
-N_RECURSIONS = 3
-T_INNER      = 2
-N_SUP        = 1
+N_RECURSIONS = 6
+T_INNER      = 3
+N_SUP        = 8
 
 # Augmentation
 N_AUGMENTATIONS = 10
@@ -1025,149 +1016,120 @@ def set_seed(seed):
 
 
 def main():
-    try:
-           
-        set_seed(SEED)
+    set_seed(SEED)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    save_path  = os.path.join(script_dir, "arc_trm_graph_best.pt")
 
+    print(f"Device          : {DEVICE}")
+    print(f"Hidden size     : {HIDDEN_SIZE}")
+    print(f"Recursions      : {N_RECURSIONS}")
+    print(f"Inner layers    : {T_INNER}")
+    print(f"Node feat dim   : {NODE_FEAT_DIM}")
+    print(f"Edge feat dim   : {EDGE_FEAT_DIM}")
+    print(f"Max nodes       : {MAX_NODES}")
+    print(f"Augmentations   : {N_AUGMENTATIONS}")
+    print(f"Batch size      : {BATCH_SIZE}\n")
 
-        print(f"Device          : {DEVICE}")
-        print(f"Hidden size     : {HIDDEN_SIZE}")
-        print(f"Recursions      : {N_RECURSIONS}")
-        print(f"Inner layers    : {T_INNER}")
-        print(f"Node feat dim   : {NODE_FEAT_DIM}")
-        print(f"Edge feat dim   : {EDGE_FEAT_DIM}")
-        print(f"Max nodes       : {MAX_NODES}")
-        print(f"Augmentations   : {N_AUGMENTATIONS}")
-        print(f"Batch size      : {BATCH_SIZE}\n")
+    # ── build dataset ─────────────────────────────────────────────────────
+    print("Building graph task samples...")
+    all_samples = build_task_samples(
+        TRAIN_PATH,
+        max_files=MAX_FILES,
+        n_augmentations=N_AUGMENTATIONS,
+        max_demos=MAX_DEMOS,
+    )
 
-        # ── build dataset ─────────────────────────────────────────────────────
-        print("Building graph task samples...")
-        all_samples = build_task_samples(
-            TRAIN_PATH,
-            max_files=MAX_FILES,
-            n_augmentations=N_AUGMENTATIONS,
-            max_demos=MAX_DEMOS,
-        )
+    if not all_samples:
+        raise RuntimeError("No samples built. Check TRAIN_PATH.")
 
-        if not all_samples:
-            raise RuntimeError("No samples built. Check TRAIN_PATH.")
+    random.shuffle(all_samples)
+    split_idx     = max(1, int(0.9 * len(all_samples)))
+    train_samples = all_samples[:split_idx]
+    val_samples   = all_samples[split_idx:] if split_idx < len(all_samples) else all_samples[:1]
 
-        random.shuffle(all_samples)
-        split_idx     = max(1, int(0.9 * len(all_samples)))
-        train_samples = all_samples[:split_idx]
-        val_samples   = all_samples[split_idx:] if split_idx < len(all_samples) else all_samples[:1]
+    print(f"Train samples   : {len(train_samples)}")
+    print(f"Val samples     : {len(val_samples)}\n")
 
-        print(f"Train samples   : {len(train_samples)}")
-        print(f"Val samples     : {len(val_samples)}\n")
+    # ── build model ───────────────────────────────────────────────────────
+    model = GraphTinyRecursiveModel(
+        hidden_size  = HIDDEN_SIZE,
+        n_heads      = N_HEADS,
+        ff_dim       = FF_DIM,
+        dropout      = DROPOUT,
+        n_recursions = N_RECURSIONS,
+        t_inner      = T_INNER,
+        n_sup        = N_SUP,
+        max_nodes    = MAX_NODES,
+        max_cells    = MAX_CELLS_PER_NODE,
+        num_colors   = NUM_COLORS,
+    ).to(DEVICE)
 
-        # ── build model ───────────────────────────────────────────────────────
-        model = GraphTinyRecursiveModel(
-            hidden_size  = HIDDEN_SIZE,
-            n_heads      = N_HEADS,
-            ff_dim       = FF_DIM,
-            dropout      = DROPOUT,
-            n_recursions = N_RECURSIONS,
-            t_inner      = T_INNER,
-            n_sup        = N_SUP,
-            max_nodes    = MAX_NODES,
-            max_cells    = MAX_CELLS_PER_NODE,
-            num_colors   = NUM_COLORS,
-        ).to(DEVICE)
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model params    : {n_params:,}\n")
 
-        n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"Model params    : {n_params:,}\n")
+    # ── optimizer with separate embedding LR ──────────────────────────────
+    emb_params   = (list(model.puzzle_emb.parameters()) +
+                    list(model.type_emb.parameters()) +
+                    list(model.pos_emb.parameters()))
+    other_params = [p for p in model.parameters()
+                    if p.requires_grad and
+                    not any(p is ep for ep in emb_params)]
 
-        # ── optimizer with separate embedding LR ──────────────────────────────
-        emb_params   = (list(model.puzzle_emb.parameters()) +
-                        list(model.type_emb.parameters()) +
-                        list(model.pos_emb.parameters()))
-        other_params = [p for p in model.parameters()
-                        if p.requires_grad and
-                        not any(p is ep for ep in emb_params)]
+    optimizer = torch.optim.AdamW([
+        {"params": emb_params,   "lr": EMBED_LR},
+        {"params": other_params, "lr": LR},
+    ], betas=(0.9, 0.95), weight_decay=0.1)
 
-        optimizer = torch.optim.AdamW([
-            {"params": emb_params,   "lr": EMBED_LR},
-            {"params": other_params, "lr": LR},
-        ], betas=(0.9, 0.95), weight_decay=0.1)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=EPOCHS, eta_min=LR/10,
+    )
 
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=EPOCHS, eta_min=LR/10,
-        )
+    ema      = EMA(model, decay=EMA_DECAY) if USE_EMA else None
+    best_val = math.inf
 
-        ema      = EMA(model, decay=EMA_DECAY) if USE_EMA else None
-        best_val = math.inf
+    print("Starting Graph TRM training...\n")
 
-        print("Starting Graph TRM training...\n")
-        start = datetime.now() 
-        for epoch in range(1, EPOCHS + 1):
-            train_loss = run_epoch(model, optimizer, train_samples,
-                                BATCH_SIZE, DEVICE, ema=ema, train=True)
+    for epoch in range(1, EPOCHS + 1):
+        train_loss = run_epoch(model, optimizer, train_samples,
+                               BATCH_SIZE, DEVICE, ema=ema, train=True)
 
-            if ema is not None:
-                ema.apply_shadow(model)
+        if ema is not None:
+            ema.apply_shadow(model)
 
-            val_loss = run_epoch(model, None, val_samples,
-                                BATCH_SIZE, DEVICE, ema=None, train=False)
-            print(datetime.now() - start)
-            if epoch % 10 == 0:
-                unique_val = {s["task_id"]: s for s in val_samples}
-                eval_tasks = list(unique_val.values())[:50]
-                n_correct  = sum(evaluate_task(s, model, DEVICE) for s in eval_tasks)
-                acc = 100.0 * n_correct / max(len(eval_tasks), 1)
-                print(f"Epoch {epoch:03d} | train={train_loss:.4f} | "
-                    f"val={val_loss:.4f} | "
-                    f"exact_match={n_correct}/{len(eval_tasks)} ({acc:.1f}%)")
-            else:
-                print(f"Epoch {epoch:03d} | train={train_loss:.4f} | val={val_loss:.4f}")
+        val_loss = run_epoch(model, None, val_samples,
+                             BATCH_SIZE, DEVICE, ema=None, train=False)
 
-            if val_loss < best_val:
-                best_val = val_loss
-                total_time = datetime.now() - start
-                now = datetime.now()
-                formatted_now = now.strftime("%m_%d_%Y___%H_%M_%S")
-                print(formatted_now)
-                save_path  = fr"{pathlib.Path(__file__).parent.resolve()}" + fr"\models_folder\trm_{formatted_now}__{round(train_loss,2)}_{round(val_loss,2)}.pt"
-                print(save_path)
-                torch.save({
-                    "model_state_dict"    : model.state_dict(),
-                    "ema_shadow"          : ema.shadow if ema else None,
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "hidden_size"         : HIDDEN_SIZE,
-                    "n_recursions"        : N_RECURSIONS,
-                    "t_inner"             : T_INNER,
-                    "best_val_loss"       : best_val,
-                    "epoch"               : epoch,
-                    "description"         : (
-                        f"total time = {total_time}; "  
-                        f"optimizer = {optimizer if optimizer else 'NA'}; " 
-                        f"scheduler = {scheduler if scheduler else 'NA'}; "
-                        f"Loss = {val_loss}; "
-                        f"EPOCHS = {EPOCHS if EPOCHS else 'NA'}; "
-                        f"N_RECURSIONS = {N_RECURSIONS if N_RECURSIONS else 'NA'}; "
-                        f"T_INNER = {T_INNER if T_INNER else 'NA'}; "
-                        f" N_SUP = {N_SUP if N_SUP else 'NA'}; "
-                        f"Stop Epoch = {epoch if epoch else 'NA'}; " 
-                        f"LR = {LR}; EMBED_LR = {EMBED_LR if EMBED_LR else 'NA'}; " 
-                        f"HIDDEN_SIZE = {HIDDEN_SIZE if HIDDEN_SIZE else 'NA'}; " 
-                        f"N_HEADS = {N_HEADS if N_HEADS else 'NA'}; " 
-                        f"FF_DIM = {FF_DIM if FF_DIM else 'NA'}; " 
-                        f"DROPOUT = {DROPOUT if DROPOUT else 'NA'}; "
-                    ),
-                }, save_path)
-                print(f"  → Saved best Graph TRM (val={best_val:.4f})")
+        if epoch % 10 == 0:
+            unique_val = {s["task_id"]: s for s in val_samples}
+            eval_tasks = list(unique_val.values())[:50]
+            n_correct  = sum(evaluate_task(s, model, DEVICE) for s in eval_tasks)
+            acc = 100.0 * n_correct / max(len(eval_tasks), 1)
+            print(f"Epoch {epoch:03d} | train={train_loss:.4f} | "
+                  f"val={val_loss:.4f} | "
+                  f"exact_match={n_correct}/{len(eval_tasks)} ({acc:.1f}%)")
+        else:
+            print(f"Epoch {epoch:03d} | train={train_loss:.4f} | val={val_loss:.4f}")
 
-            if ema is not None:
-                ema.restore(model)
+        if val_loss < best_val:
+            best_val = val_loss
+            torch.save({
+                "model_state_dict"    : model.state_dict(),
+                "ema_shadow"          : ema.shadow if ema else None,
+                "optimizer_state_dict": optimizer.state_dict(),
+                "hidden_size"         : HIDDEN_SIZE,
+                "n_recursions"        : N_RECURSIONS,
+                "t_inner"             : T_INNER,
+                "best_val_loss"       : best_val,
+                "epoch"               : epoch,
+            }, save_path)
+            print(f"  → Saved best Graph TRM (val={best_val:.4f})")
 
-            scheduler.step()
+        if ema is not None:
+            ema.restore(model)
 
-        print(f"\nTraining complete. Best val loss: {best_val:.4f}")
-    except KeyboardInterrupt:
-        print("Interrupted by Ctrl + C")
-    finally:
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        scheduler.step()
+
+    print(f"\nTraining complete. Best val loss: {best_val:.4f}")
 
 
 if __name__ == "__main__":

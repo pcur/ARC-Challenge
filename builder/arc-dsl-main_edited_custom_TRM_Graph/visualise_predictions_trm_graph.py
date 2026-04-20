@@ -28,6 +28,7 @@ import json
 import random
 from typing import List, Dict, Optional
 from collections import Counter
+import pathlib
 
 import torch
 import numpy as np
@@ -53,8 +54,10 @@ from arc_trm_graph import (
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
-TRAIN_PATH   = r"C:\Users\tedhun\OneDrive - Wanzl GmbH & Co. KGaA\Microsoft Teams Chat Files\outputs\Documents\GS\ARC\Assignment10\Builder\data\training"
-TRM_CKPT     = "arc_trm_graph_best.pt"
+#TRAIN_PATH   = r"C:\Users\tedhun\OneDrive - Wanzl GmbH & Co. KGaA\Microsoft Teams Chat Files\outputs\Documents\GS\ARC\Assignment10\Builder\data\training"
+TRAIN_PATH   = fr"{pathlib.Path.cwd()}" + r"\builder\data\training"
+#TRM_CKPT     = "arc_trm_graph_best.pt"
+TRM_CKPT     = fr"{pathlib.Path.cwd()}" + r"\builder\models_folder"
 DEVICE       = "cuda" if torch.cuda.is_available() else "cpu"
 
 N_TASKS_TO_PLOT = 10

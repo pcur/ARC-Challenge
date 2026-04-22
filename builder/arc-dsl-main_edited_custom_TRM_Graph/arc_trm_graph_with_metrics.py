@@ -85,12 +85,12 @@ save_path  = os.path.join(script_dir, f"test_model.pt")
 
 SEED       = 42
 #EPOCHS     = 60
-EPOCHS     = 2
-LR         = 1e-4
+EPOCHS     = 10
+LR         = 1e-3
 EMBED_LR   = 1e-2
-BATCH_SIZE = 30
+BATCH_SIZE = 50
 MAX_FILES  = None
-PRINT_EVERY = 10
+PRINT_EVERY = 1
 
 # Graph settings — must match what custom_object3 produces
 NODE_FEAT_DIM      = 22    # node_to_feature_vector output dim
@@ -1156,6 +1156,7 @@ def run_epoch(model, optimizer, samples, batch_size, device,
               ema=None, train=True, metrics_config=None):
     metrics_config = metrics_config or DEBUG_METRICS
     model.train() if train else model.eval()
+    
     if train:
         random.shuffle(samples)  #note we are shuffling the samples, 
 
@@ -1391,8 +1392,12 @@ def main():
 
         random.shuffle(all_samples)
         split_idx     = max(1, int(0.9 * len(all_samples)))
+        
         train_samples = all_samples[:split_idx]
         val_samples   = all_samples[split_idx:] if split_idx < len(all_samples) else all_samples[:1]
+        if DEBUG_METRICS.get("gradient_norms", False):
+            train_samples = all_samples[:TINY_SUBSET_SIZE]
+            val_samples = all_samples[:TINY_SUBSET_SIZE]
 
         print(f"Train samples   : {len(train_samples)}")
         print(f"Val samples     : {len(val_samples)}\n")

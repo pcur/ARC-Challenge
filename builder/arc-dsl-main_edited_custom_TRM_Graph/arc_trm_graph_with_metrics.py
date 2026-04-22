@@ -127,13 +127,13 @@ NUM_COLORS = 10
 
 # Debug / diagnostics toggles — set to False to preserve the original run style as much as possible
 DEBUG_METRICS = {
-    "tiny_subset_overfit": False,
-    "gradient_norms": False,
-    "activation_norms": False,
-    "per_recursion_step_accuracy": False,
-    "output_validity": False,
-    "train_val_gap": True,
-    "confidence_calibration": False,
+    "tiny_subset_overfit": True,
+    "gradient_norms": True,
+    "activation_norms": True,
+    "per_recursion_step_accuracy": True,
+    "output_validity": True,
+    "train_val_gap": True, #True by default
+    "confidence_calibration": True,
 }
 
 # Debug settings
@@ -304,14 +304,14 @@ def build_task_samples(
         test_raw           : raw test output grid (for exact-match eval)
         task_id            : filename without .json
     """
-    files = sorted([f for f in os.listdir(train_path) if f.endswith(".json")])
+    files = sorted([f for f in os.listdir(train_path) if f.endswith(".json")]) #os.listdir: returns list of the names of the entries in a directory
     if max_files is not None:
-        files = files[:max_files]
+        files = files[:max_files] #only take max_files amount of samples if we set a max_files quantity
 
     samples, skipped = [], 0
     n_files = len(files)
 
-    for file_idx, fname in enumerate(files):
+    for file_idx, fname in enumerate(files): # enumerate turns each element in files into an (idx, value) object
         if file_idx % 50 == 0:
             print(f"  Processing file {file_idx+1}/{n_files}  "
                   f"({len(samples)} samples so far)...")
@@ -322,12 +322,12 @@ def build_task_samples(
         train_pairs = task.get("train", [])
         test_pairs  = task.get("test",  [])
 
-        if not train_pairs or not test_pairs:
+        if not train_pairs or not test_pairs: # skip tasks if they are missing train_pairs or test_pairs
             skipped += 1
-            continue
+            continue #skip remainder of current iteration 
 
         test_pair = test_pairs[0]
-        if "output" not in test_pair:
+        if "output" not in test_pair: #if test pair only has an input grid but no output grid skip it, this has a bit of a hole though because some tasks have more than one test pair
             skipped += 1
             continue
 
@@ -1157,7 +1157,7 @@ def run_epoch(model, optimizer, samples, batch_size, device,
     metrics_config = metrics_config or DEBUG_METRICS
     model.train() if train else model.eval()
     if train:
-        random.shuffle(samples)
+        random.shuffle(samples)  #note we are shuffling the samples, 
 
     total_loss    = 0.0
     total_batches = 0

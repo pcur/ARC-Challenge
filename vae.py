@@ -49,9 +49,10 @@ class VAEConfig:
     learning_rate: float = 1e-3
     weight_decay: float = 3e-8
 
-    num_epochs: int = 1000
+    cnn_epochs: int = 125
+    transformer_epochs: int = 30
 
-    beta_target: float = 0.01
+    beta_target: float = 0.2
     kl_warmup_epochs: int = 30
 
     train_on_outputs: bool = False
@@ -123,12 +124,15 @@ class CNNEncoder(nn.Module):
 
             nn.Conv2d(H[0], H[1], 3, stride=2, padding=1),
             nn.ReLU(),
+            nn.Dropout(0.2),
 
             nn.Conv2d(H[1], H[2], 3, padding=1),
             nn.ReLU(),
+            nn.Dropout(0.1),
 
             nn.Conv2d(H[2], H[3], 3, stride=2, padding=1),
             nn.ReLU(),
+            nn.Dropout(0.1),
 
             nn.Conv2d(H[3], H[4], 3, stride=2, padding=1),
             nn.ReLU(),
@@ -335,7 +339,7 @@ def reconstruction_accuracy(recon_logits, target, mask):
 # TRAINING
 # ============================================================
 
-def train_single_model(model, loader, config, model_name):
+def train_single_model(model, loader, config, num_epochs, model_name):
     outdir = Path(config.output_dir) / model_name
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -361,7 +365,7 @@ def train_single_model(model, loader, config, model_name):
         "acc": [],
     }
 
-    for epoch in range(config.num_epochs):
+    for epoch in range(num_epochs):
         model.train()
 
         beta = min(
@@ -418,7 +422,7 @@ def train_single_model(model, loader, config, model_name):
 
         print(
             f"[{model_name}] "
-            f"Epoch {epoch+1:03d}/{config.num_epochs} | "
+            f"Epoch {epoch+1:03d}/{num_epochs} | "
             f"CE={avg_recon:.4f} | "
             f"KL={avg_kl:.4f} | "
             f"Acc={avg_acc:.4f}"
@@ -510,7 +514,8 @@ def main():
         cnn_vae,
         loader,
         config,
-        "cnn_vae"
+        config.cnn_epochs,
+        "cnn_vae",
     )
 
     print("\n===================================")
@@ -526,7 +531,8 @@ def main():
         transformer_vae,
         loader,
         config,
-        "transformer_vae"
+        config.transformer_epochs,
+        "transformer_vae",
     )
 
 
